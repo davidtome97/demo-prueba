@@ -137,17 +137,19 @@ jobs:
       EC2_LLAVE_SSH: ${{ secrets.EC2_LLAVE_SSH }}
       EC2_KNOWN_HOSTS: ${{ secrets.EC2_KNOWN_HOSTS }}
 
-      # 👉 NO ponemos defaults aquí (GitHub NO evalúa || como esperas)
+      # (Paso 5) NO dependen de DB. Pueden venir vacías y se pondrán defaults en EC2.
       DB_MODE: ${{ secrets.DB_MODE }}
       DB_ENGINE: ${{ secrets.DB_ENGINE }}
       DB_PORT: ${{ secrets.DB_PORT }}
       DB_NAME: ${{ secrets.DB_NAME }}
+      DB_SSLMODE: ${{ secrets.DB_SSLMODE }}
+      APP_PORT: ${{ secrets.APP_PORT }}
+
+      # (Paso 6) DB remota: pueden NO existir aún. NO las usamos en Paso 5.
       DB_URI: ${{ secrets.DB_URI }}
       DB_HOST: ${{ secrets.DB_HOST }}
       DB_USER: ${{ secrets.DB_USER }}
       DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
-      DB_SSLMODE: ${{ secrets.DB_SSLMODE }}
-      APP_PORT: ${{ secrets.APP_PORT }}
 
     steps:
       - uses: actions/checkout@v4
@@ -184,87 +186,98 @@ jobs:
             IMAGE_TAG="${GITHUB_SHA}"
           fi
 
+         
+          #   Pasamos variables como argumentos a ssh para que NO se queden en el comando remoto
+          #   y podamos poner defaults en EC2 si vienen vacías.
           ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=yes \
             "${EC2_USER}@${EC2_HOST}" \
-            "export AWS_REGION='${AWS_REGION}';
-            export AWS_ACCOUNT_ID='${AWS_ACCOUNT_ID}';
-            export ECR_REPOSITORY='${ECR_REPOSITORY}';
-            export IMAGE_TAG='${IMAGE_TAG}';
+            AWS_REGION="${AWS_REGION}" \
+            AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID}" \
+            ECR_REPOSITORY="${ECR_REPOSITORY}" \
+            IMAGE_TAG="${IMAGE_TAG}" \
+            DB_MODE="${DB_MODE:-}" \
+            DB_ENGINE="${DB_ENGINE:-}" \
+            DB_PORT="${DB_PORT:-}" \
+            DB_NAME="${DB_NAME:-}" \
+            DB_SSLMODE="${DB_SSLMODE:-}" \
+            APP_PORT="${APP_PORT:-}" \
+            DB_URI="${DB_URI:-}" \
+            DB_HOST="${DB_HOST:-}" \
+            DB_USER="${DB_USER:-}" \
+            DB_PASSWORD="${DB_PASSWORD:-}" \
+            bash -se <<'EOF'
+            set -euo pipefail
 
-            export DB_MODE='${DB_MODE}';
-            export DB_ENGINE='${DB_ENGINE}';
-            export DB_PORT='${DB_PORT}';
-            export DB_NAME='${DB_NAME}';
-            export DB_URI='${DB_URI}';
-            export DB_HOST='${DB_HOST}';
-            export DB_USER='${DB_USER}';
-            export DB_PASSWORD='${DB_PASSWORD}';
-            export DB_SSLMODE='${DB_SSLMODE}';
-            export APP_PORT='${APP_PORT}';
+            clean() { printf '%s' "${1:-}" | tr -d '\r' | tr -d '\n'; }
 
-            bash -se" <<'EOF'
-          set -euo pipefail
+            cd ~/app
+            export COMPOSE_PROJECT_NAME="demo-python"
 
-          clean() { printf '%s' "${1:-}" | tr -d '\r' | tr -d '\n'; }
+            # -----------------------
+            # Defaults SEGUROS (Paso 5)
+            # -----------------------
+            DB_MODE_IN="$(clean "${DB_MODE:-}")"
+            [ -z "$DB_MODE_IN" ] && DB_MODE_IN="local"
+            case "$DB_MODE_IN" in local|remote) ;; *) echo "❌ DB_MODE inválido: $DB_MODE_IN"; exit 1;; esac
+            export COMPOSE_PROFILES="$DB_MODE_IN"
 
-          cd ~/app
-          export COMPOSE_PROJECT_NAME="demo-python"
+            export DB_ENGINE="$(clean "${DB_ENGINE:-postgres}")"   # el tuyo en local ahora
+            export DB_PORT="$(clean "${DB_PORT:-5432}")"
+            export DB_NAME="$(clean "${DB_NAME:-demo}")"
+            export APP_PORT="$(clean "${APP_PORT:-8081}")"
+            export DB_SSLMODE="$(clean "${DB_SSLMODE:-disable}")"
 
-          # -----------------------
-          # Defaults SEGUROS (Paso 5)
-          # -----------------------
-          DB_MODE_IN="$(clean "${DB_MODE:-local}")"
-          [ -z "$DB_MODE_IN" ] && DB_MODE_IN="local"
-          case "$DB_MODE_IN" in local|remote) ;; *) echo "❌ DB_MODE inválido: $DB_MODE_IN"; exit 1;; esac
-          export COMPOSE_PROFILES="$DB_MODE_IN"
+            AWS_REGION_IN="$(clean "${AWS_REGION}")"
+            AWS_ACCOUNT_ID_IN="$(clean "${AWS_ACCOUNT_ID}")"
+            ECR_REPO_IN="$(clean "${ECR_REPOSITORY}")"
+            IMAGE_TAG_IN="$(clean "${IMAGE_TAG}")"
 
-          export DB_ENGINE="$(clean "${DB_ENGINE:-mongo}")"
-          export DB_PORT="$(clean "${DB_PORT:-27017}")"
-          export DB_NAME="$(clean "${DB_NAME:-demo}")"
-          export APP_PORT="$(clean "${APP_PORT:-8082}")"
-          export DB_SSLMODE="$(clean "${DB_SSLMODE:-require}")"
+            ECR_REGISTRY="${AWS_ACCOUNT_ID_IN}.dkr.ecr.${AWS_REGION_IN}.amazonaws.com"
+            export IMAGE_URI="${ECR_REGISTRY}/${ECR_REPO_IN}:${IMAGE_TAG_IN}"
 
-          AWS_REGION_IN="$(clean "${AWS_REGION}")"
-          AWS_ACCOUNT_ID_IN="$(clean "${AWS_ACCOUNT_ID}")"
-          ECR_REPO_IN="$(clean "${ECR_REPOSITORY}")"
-          IMAGE_TAG_IN="$(clean "${IMAGE_TAG}")"
-
-          ECR_REGISTRY="${AWS_ACCOUNT_ID_IN}.dkr.ecr.${AWS_REGION_IN}.amazonaws.com"
-          export IMAGE_URI="${ECR_REGISTRY}/${ECR_REPO_IN}:${IMAGE_TAG_IN}"
-
-          # -----------------------
-          # ✅ CLAVE: dummy defaults para que Compose no explote al interpolar "remote"
-          # (aunque estemos en profile local)
-          # -----------------------
-          export DB_HOST="$(clean "${DB_HOST:-dummy-host}")"
-          export DB_USER="$(clean "${DB_USER:-dummy-user}")"
-          export DB_PASSWORD="$(clean "${DB_PASSWORD:-dummy-pass}")"
-          export DB_URI="$(clean "${DB_URI:-}")"
-
-          # -----------------------
-          # BD solo se valida en remote (Paso 6)
-          # -----------------------
-          if [ "$COMPOSE_PROFILES" = "remote" ]; then
-            if [ "$DB_ENGINE" = "mongo" ]; then
-              [ -n "$DB_URI" ] || (echo "❌ Falta DB_URI para mongo remoto" && exit 1)
-              unset DB_HOST DB_PORT DB_USER DB_PASSWORD || true
+            # -----------------------
+            # CLAVE para que NO explote la interpolación
+            # - En local: ponemos credenciales locales coherentes (demo/demo)
+            # - En remote: permitimos que venga vacío y se validará en Paso 6
+            # -----------------------
+            if [ "$COMPOSE_PROFILES" = "local" ]; then
+              export DB_USER="$(clean "${DB_USER:-demo}")"
+              export DB_PASSWORD="$(clean "${DB_PASSWORD:-demo}")"
+              export DB_HOST="$(clean "${DB_HOST:-postgres}")"
+              export DB_URI="$(clean "${DB_URI:-}")"
             else
-              # si siguen siendo dummy, paramos (así no “pasa” el Paso 6)
-              [ "$DB_HOST" != "dummy-host" ] || (echo "❌ DB_HOST real requerido en remote" && exit 1)
-              [ "$DB_USER" != "dummy-user" ] || (echo "❌ DB_USER real requerido en remote" && exit 1)
-              [ "$DB_PASSWORD" != "dummy-pass" ] || (echo "❌ DB_PASSWORD real requerido en remote" && exit 1)
+              # remote: ponemos placeholders para que compose no casque en "config/parse",
+              # pero luego VALIDAMOS y fallamos si siguen placeholder.
+              export DB_HOST="$(clean "${DB_HOST:-__MISSING_DB_HOST__}")"
+              export DB_USER="$(clean "${DB_USER:-__MISSING_DB_USER__}")"
+              export DB_PASSWORD="$(clean "${DB_PASSWORD:-__MISSING_DB_PASSWORD__}")"
+              export DB_URI="$(clean "${DB_URI:-__MISSING_DB_URI__}")"
             fi
-          fi
 
-          # -----------------------
-          # Login ECR + deploy
-          # -----------------------
-          aws ecr get-login-password --region "$AWS_REGION_IN" \
-            | sudo -E docker login --username AWS --password-stdin "$ECR_REGISTRY"
+            # -----------------------
+            # Validación SOLO en remote (Paso 6)
+            # -----------------------
+            if [ "$COMPOSE_PROFILES" = "remote" ]; then
+              if [ "$DB_ENGINE" = "mongo" ]; then
+                [ "$DB_URI" != "__MISSING_DB_URI__" ] || (echo "❌ Falta DB_URI para mongo remoto" && exit 1)
+                unset DB_HOST DB_PORT DB_USER DB_PASSWORD || true
+              else
+                [ "$DB_HOST" != "__MISSING_DB_HOST__" ] || (echo "❌ Falta DB_HOST para SQL remoto" && exit 1)
+                [ "$DB_USER" != "__MISSING_DB_USER__" ] || (echo "❌ Falta DB_USER para SQL remoto" && exit 1)
+                [ "$DB_PASSWORD" != "__MISSING_DB_PASSWORD__" ] || (echo "❌ Falta DB_PASSWORD para SQL remoto" && exit 1)
+              fi
+            fi
 
-          sudo -E docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.yml --profile "$COMPOSE_PROFILES" down --remove-orphans || true
-          sudo -E docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.yml --profile "$COMPOSE_PROFILES" pull
-          sudo -E docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.yml --profile "$COMPOSE_PROFILES" up -d --remove-orphans
-          echo "Estado:"
-          sudo docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Ports}}\t{{.Status}}'
-          EOF
+            # -----------------------
+            # Login ECR + deploy
+            # -----------------------
+            aws ecr get-login-password --region "$AWS_REGION_IN" \
+              | sudo -E docker login --username AWS --password-stdin "$ECR_REGISTRY"
+
+            sudo -E docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.yml --profile "$COMPOSE_PROFILES" down --remove-orphans || true
+            sudo -E docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.yml --profile "$COMPOSE_PROFILES" pull
+            sudo -E docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.yml --profile "$COMPOSE_PROFILES" up -d --remove-orphans
+
+            echo "Estado:"
+            sudo docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Ports}}\t{{.Status}}'
+            EOF
