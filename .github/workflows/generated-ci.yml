@@ -208,7 +208,6 @@ jobs:
           clean() { printf '%s' "${1:-}" | tr -d '\r' | tr -d '\n'; }
 
           cd ~/app
-
           export COMPOSE_PROJECT_NAME="demo-python"
 
           # -----------------------
@@ -216,6 +215,7 @@ jobs:
           # -----------------------
           DB_MODE_IN="$(clean "${DB_MODE:-local}")"
           [ -z "$DB_MODE_IN" ] && DB_MODE_IN="local"
+          case "$DB_MODE_IN" in local|remote) ;; *) echo "❌ DB_MODE inválido: $DB_MODE_IN"; exit 1;; esac
           export COMPOSE_PROFILES="$DB_MODE_IN"
 
           export DB_ENGINE="$(clean "${DB_ENGINE:-mongo}")"
@@ -233,19 +233,26 @@ jobs:
           export IMAGE_URI="${ECR_REGISTRY}/${ECR_REPO_IN}:${IMAGE_TAG_IN}"
 
           # -----------------------
+          # ✅ CLAVE: dummy defaults para que Compose no explote al interpolar "remote"
+          # (aunque estemos en profile local)
+          # -----------------------
+          export DB_HOST="$(clean "${DB_HOST:-dummy-host}")"
+          export DB_USER="$(clean "${DB_USER:-dummy-user}")"
+          export DB_PASSWORD="$(clean "${DB_PASSWORD:-dummy-pass}")"
+          export DB_URI="$(clean "${DB_URI:-}")"
+
+          # -----------------------
           # BD solo se valida en remote (Paso 6)
           # -----------------------
           if [ "$COMPOSE_PROFILES" = "remote" ]; then
             if [ "$DB_ENGINE" = "mongo" ]; then
-              export DB_URI="$(clean "${DB_URI:-}")"
               [ -n "$DB_URI" ] || (echo "❌ Falta DB_URI para mongo remoto" && exit 1)
               unset DB_HOST DB_PORT DB_USER DB_PASSWORD || true
             else
-              export DB_HOST="$(clean "${DB_HOST:-}")"
-              export DB_USER="$(clean "${DB_USER:-}")"
-              export DB_PASSWORD="$(clean "${DB_PASSWORD:-}")"
-              [ -n "$DB_HOST" ] && [ -n "$DB_USER" ] && [ -n "$DB_PASSWORD" ] \
-                || (echo "❌ Faltan DB_HOST/DB_USER/DB_PASSWORD" && exit 1)
+              # si siguen siendo dummy, paramos (así no “pasa” el Paso 6)
+              [ "$DB_HOST" != "dummy-host" ] || (echo "❌ DB_HOST real requerido en remote" && exit 1)
+              [ "$DB_USER" != "dummy-user" ] || (echo "❌ DB_USER real requerido en remote" && exit 1)
+              [ "$DB_PASSWORD" != "dummy-pass" ] || (echo "❌ DB_PASSWORD real requerido en remote" && exit 1)
             fi
           fi
 
@@ -255,9 +262,9 @@ jobs:
           aws ecr get-login-password --region "$AWS_REGION_IN" \
             | sudo docker login --username AWS --password-stdin "$ECR_REGISTRY"
 
-          sudo docker compose -p "$COMPOSE_PROJECT_NAME" --profile "$COMPOSE_PROFILES" down --remove-orphans || true
-          sudo docker compose -p "$COMPOSE_PROJECT_NAME" --profile "$COMPOSE_PROFILES" pull
-          sudo docker compose -p "$COMPOSE_PROJECT_NAME" --profile "$COMPOSE_PROFILES" up -d --remove-orphans
+          sudo docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.yml --profile "$COMPOSE_PROFILES" down --remove-orphans || true
+          sudo docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.yml --profile "$COMPOSE_PROFILES" pull
+          sudo docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.yml --profile "$COMPOSE_PROFILES" up -d --remove-orphans
 
           echo "Estado:"
           sudo docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Ports}}\t{{.Status}}'
